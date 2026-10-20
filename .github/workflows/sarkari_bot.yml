@@ -39,7 +39,10 @@ jobs:
 
       - name: 5. Install React Studio Dependencies
         working-directory: ./reel-studio
-        run: npm install
+        run: |
+          npm install -g npm@latest
+          rm -rf node_modules package-lock.json
+          npm install
 
       - name: 6. Create serviceAccountKey.json from Secret
         env:
