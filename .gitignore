@@ -1,0 +1,53 @@
+# ==========================================
+# 1. SECRETS & CREDENTIALS (NEVER COMMIT)
+# ==========================================
+.env
+.env.*
+serviceAccountKey.json
+service_account.json
+
+# ==========================================
+# 2. PYTHON & VIRTUAL ENVIRONMENT
+# ==========================================
+venv/
+.venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+pip-log.txt
+
+# ==========================================
+# 3. NODE / REACT (reel-studio)
+# ==========================================
+node_modules/
+reel-studio/node_modules/
+package-lock.json
+reel-studio/package-lock.json
+reel-studio/dist/
+reel-studio/.vite/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ==========================================
+# 4. GENERATED MEDIA, CACHE & TEMP FILES
+# ==========================================
+output/
+llm_cache.json
+*.png
+*.jpg
+*.jpeg
+*.mp4
+!assets/**
+!reel-studio/public/**
+
+# ==========================================
+# 5. IDE & OS FILES
+# ==========================================
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

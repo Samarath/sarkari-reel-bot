@@ -1,0 +1,76 @@
+name: Sarkari Drop - Automated Reel Pipeline
+
+on:
+  schedule:
+    # Runs at minute 0 past every 3rd hour (8 runs/day)
+    - cron: '0 */3 * * *'
+  workflow_dispatch: # Gives you a manual "Run workflow" button in GitHub UI
+
+# Prevent two runs from overlapping if a batch has a long cooldown
+concurrency:
+  group: sarkari-reel-pipeline
+  cancel-in-progress: false
+
+jobs:
+  scrape-render-publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: 1. Checkout Monorepo
+        uses: actions/checkout@v4
+
+      - name: 2. Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: 'pip'
+
+      - name: 3. Set up Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 4. Install Python Dependencies & Playwright Chromium
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          playwright install chromium --with-deps
+
+      - name: 5. Install React Studio Dependencies
+        working-directory: ./reel-studio
+        run: npm install
+
+      - name: 6. Create serviceAccountKey.json from Secret
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: |
+          echo "$GCP_SA_KEY" > serviceAccountKey.json
+
+      - name: 7. Start React Reel Studio in Background
+        working-directory: ./reel-studio
+        run: |
+          npm run dev -- --host 127.0.0.1 --port 5173 &
+          echo "Waiting for Vite React server on port 5173..."
+          npx wait-on http://127.0.0.1:5173 -t 30000
+
+      - name: 8. Run Scraper & Publisher Pipeline
+        env:
+          PYTHONUNBUFFERED: "1"
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          CLOUDINARY_CLOUD_NAME: ${{ secrets.CLOUDINARY_CLOUD_NAME }}
+          CLOUDINARY_API_KEY: ${{ secrets.CLOUDINARY_API_KEY }}
+          CLOUDINARY_API_SECRET: ${{ secrets.CLOUDINARY_API_SECRET }}
+          INSTAGRAM_ACCOUNT_ID: ${{ secrets.INSTAGRAM_ACCOUNT_ID }}
+          FACEBOOK_PAGE_ID: ${{ secrets.FACEBOOK_PAGE_ID }}
+          INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
+        run: |
+          echo "=== STEP 1: SCOUTING & SCRAPING NEW JOBS TO FIRESTORE ==="
+          python main.py
+          echo "=== STEP 2: RENDERING & PUBLISHING REELS ==="
+          python publisher.py
+
+      - name: 9. Clean Up Credentials
+        if: always()
+        run: rm -f serviceAccountKey.json
