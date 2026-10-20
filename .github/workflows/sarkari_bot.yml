@@ -26,10 +26,10 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
-      - name: 3. Set up Node.js 20
+      - name: 3. Set up Node.js 24
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '24'
 
       - name: 4. Install Python Dependencies & Playwright Chromium
         run: |
@@ -40,7 +40,6 @@ jobs:
       - name: 5. Install React Studio Dependencies
         working-directory: ./reel-studio
         run: |
-          npm install -g npm@latest
           rm -rf node_modules package-lock.json
           npm install
 
