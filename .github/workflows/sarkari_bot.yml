@@ -3,7 +3,7 @@ name: Sarkari Drop - Automated Reel Pipeline
 on:
   schedule:
     # Runs at minute 0 past every 3rd hour (8 runs/day)
-    - cron: '0 */3 * * *'
+    - cron: '17 */3 * * *'
   workflow_dispatch: # Gives you a manual "Run workflow" button in GitHub UI
 
 # Prevent two runs from overlapping if a batch has a long cooldown
