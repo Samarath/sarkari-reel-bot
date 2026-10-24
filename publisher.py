@@ -106,6 +106,69 @@ class ReelPublisher:
         except ValueError:
             pass
 
+    def _probe_account(self, object_id: str, token: str, platform: str) -> bool:
+        """
+        Lightweight GET against the account/page to confirm the token works
+        and the API isn't throttling us. Returns True if it's safe to try posting.
+        """
+        try:
+            resp = requests.get(
+                f"{self.graph_base_url}/{object_id}",
+                params={"fields": "id", "access_token": token},
+                timeout=15,
+            )
+        except requests.RequestException as e:
+            print(f"   [PRE-CHECK] {platform}: network error ({e}) — marking unavailable.")
+            return False
+
+        if resp.ok:
+            return True
+
+        try:
+            self._check_for_rate_limit(resp, platform)
+        except MetaRateLimitError as e:
+            print(f"   [PRE-CHECK] {platform} is rate-limited: {e}")
+            return False
+
+        print(f"   [PRE-CHECK] {platform} check failed (bad/expired token?): {resp.text}")
+        return False
+
+    def preflight_check(self) -> dict:
+        """
+        Runs before anything is rendered or uploaded. Returns which platforms
+        are usable right now plus the remaining Instagram 24h quota.
+        (Instagram is the priority: if it is unavailable, the caller posts nothing.)
+
+        Note: Facebook has no quota endpoint, so a 368 posting block can only
+        be detected for sure when posting. This pre-check catches bad/expired
+        tokens and API-level throttling early.
+        """
+        if self.dry_run:
+            return {"instagram": True, "facebook": True, "ig_quota": 25}
+
+        print("[PRE-CHECK] Checking Instagram and Facebook availability...")
+
+        ig_ok = False
+        ig_quota = 0
+        if self.ig_account_id and self.access_token:
+            ig_quota = self.check_instagram_quota()
+            if ig_quota <= 0:
+                print("   [PRE-CHECK] Instagram: 24h publishing quota exhausted.")
+            else:
+                ig_ok = self._probe_account(self.ig_account_id, self.access_token, "INSTAGRAM")
+        else:
+            print("   [PRE-CHECK] Instagram: credentials missing in env.")
+
+        fb_ok = False
+        if self.fb_page_id and self.fb_page_token:
+            fb_ok = self._probe_account(self.fb_page_id, self.fb_page_token, "FACEBOOK")
+        else:
+            print("   [PRE-CHECK] Facebook: credentials missing in env.")
+
+        print(f"[PRE-CHECK] Instagram: {'OK' if ig_ok else 'UNAVAILABLE'} | "
+              f"Facebook: {'OK' if fb_ok else 'UNAVAILABLE'}\n")
+        return {"instagram": ig_ok, "facebook": fb_ok, "ig_quota": ig_quota}
+
     def pick_random_music(self) -> str | None:
         """Picks a random .mp3 file from assets/music/ if available."""
         mp3_files = glob.glob(os.path.join(self.music_dir, "*.mp3"))
@@ -373,32 +436,45 @@ def publish_all_pending_jobs(
     dry_run: bool = False,
 ):
     """
-    Fetches all pending ('QUEUED') jobs from Firestore and publishes them one by one
-    with randomized human-like cooldowns and Meta Graph API quota/rate-limit protection.
+    Fetches pending ('QUEUED') jobs from Firestore and publishes them one by one.
+
+    Platform logic:
+      - Instagram is the priority. The pre-flight check runs first; if Instagram is
+        unavailable (rate-limited, quota used up, bad token), NOTHING is posted anywhere.
+      - Each job goes to Instagram first. If Instagram gets rate-limited at any point,
+        the batch stops immediately (no Facebook fallback) and remaining jobs stay 'QUEUED'.
+      - Facebook is only attempted AFTER Instagram succeeds. If Facebook fails or is
+        rate-limited, Instagram posting continues normally.
     """
     db = FirestoreManager()
     renderer = ReelCardRenderer()
     publisher = ReelPublisher(dry_run=dry_run)
 
-    # 1. Check how many posts Meta allows in the current 24h rolling window
-    remaining_quota = publisher.check_instagram_quota()
-    if remaining_quota <= 0 and not dry_run:
-        print("[STOP] Meta 24-hour publishing quota is exhausted. Will resume automatically later.")
+    # 1. Pre-flight: check platforms BEFORE rendering/uploading anything
+    status = publisher.preflight_check()
+    ig_ok = status["instagram"]
+    fb_ok = status["facebook"]
+    ig_quota = status["ig_quota"]
+
+    if not dry_run and not ig_ok:
+        print("[STOP] Instagram is unavailable right now. Nothing will be posted anywhere. "
+              "Jobs stay 'QUEUED' for the next run.")
         return
 
-    # 2. Fetch all pending ('QUEUED') jobs sorted by priority_score
+    # 2. Fetch pending ('QUEUED') jobs sorted by priority_score
     all_queued_jobs = db.get_next_batch_to_publish(batch_size=1000)
     if not all_queued_jobs:
         print("No 'QUEUED' jobs waiting in Firestore. All caught up!")
         return
 
-    # Cap the run by both remaining 24h Meta quota and max_per_run safety ceiling
-    safe_limit = min(len(all_queued_jobs), remaining_quota, max_per_run) if not dry_run else len(all_queued_jobs)
+    # Cap the run by both remaining 24h Instagram quota and max_per_run safety ceiling
+    safe_limit = len(all_queued_jobs) if dry_run else min(len(all_queued_jobs), ig_quota, max_per_run)
     jobs_to_process = all_queued_jobs[:safe_limit]
 
     print(
         f"Found {len(all_queued_jobs)} total QUEUED job(s) in Firestore. "
-        f"Publishing {len(jobs_to_process)} in this session (cooldown: {min_cooldown_sec}-{max_cooldown_sec}s).\n"
+        f"Publishing up to {len(jobs_to_process)} in this session "
+        f"(cooldown: {min_cooldown_sec}-{max_cooldown_sec}s).\n"
     )
 
     published_count = 0
@@ -431,22 +507,31 @@ def publish_all_pending_jobs(
             # 4. Upload MP4 to Cloudinary
             video_url, cloudinary_public_id = publisher.upload_to_cloudinary(mp4_path, job_id)
 
-            # 5. Publish to Instagram Reels
-            ig_media_id = publisher.publish_to_instagram(video_url, caption)
-
-            # 6. Publish to Facebook Page Reels ( pauses briefly so we don't hit both endpoints in the same millisecond)
-            time.sleep(5)
+            # 5. Publish to Instagram Reels (priority). Rate limit -> stop everything.
             try:
-                publisher.publish_to_facebook(video_url, caption)
-            except MetaRateLimitError:
-                raise
-            except Exception as fb_err:
-                print(f"   [FACEBOOK WARNING] Facebook publish failed: {fb_err}")
+                ig_media_id = publisher.publish_to_instagram(video_url, caption)
+            except MetaRateLimitError as ig_rate_err:
+                print(f"\n[CIRCUIT BREAKER] {ig_rate_err}")
+                print("[CIRCUIT BREAKER] Instagram is rate-limited. Stopping batch; "
+                      "nothing more will be posted. Remaining jobs stay 'QUEUED'.")
+                break
 
-            # 7. STRICT ORDER: Mark PUBLISHED in Firestore only after Instagram succeeds
+            # 6. STRICT ORDER: Mark PUBLISHED in Firestore only after Instagram succeeds
             if ig_media_id:
                 db.mark_status(job_id, "PUBLISHED")
                 published_count += 1
+
+            # 7. Facebook only after Instagram succeeded; its failures never stop Instagram
+            if fb_ok:
+                time.sleep(5)  # don't hit both endpoints in the same moment
+                try:
+                    publisher.publish_to_facebook(video_url, caption)
+                except MetaRateLimitError as fb_rate_err:
+                    print(f"   [FACEBOOK BLOCKED] {fb_rate_err}")
+                    print("   [FACEBOOK] Skipping Facebook for the rest of this run; Instagram continues.")
+                    fb_ok = False
+                except Exception as fb_err:
+                    print(f"   [FACEBOOK WARNING] Facebook publish failed: {fb_err}")
 
             # 8. Jittered cooldown before the next job to protect account health
             if index < len(jobs_to_process):
@@ -456,14 +541,6 @@ def publish_all_pending_jobs(
                     f"before Reel #{index + 1} to respect Meta rate limits...\n"
                 )
                 time.sleep(wait_seconds)
-
-        except MetaRateLimitError as rate_err:
-            print(f"\n[CIRCUIT BREAKER] {rate_err}")
-            print(
-                "[CIRCUIT BREAKER] Stopping batch immediately to protect your Meta account. "
-                "Remaining jobs stay 'QUEUED' in Firestore for the next run."
-            )
-            break
 
         except Exception as e:
             print(f"   [ERROR] Failed to publish job {job_id}: {e}")
@@ -482,7 +559,7 @@ def publish_all_pending_jobs(
 
 
 if __name__ == "__main__":
-    # Fetches all QUEUED jobs and publishes them sequentially with 3-4 min jittered spacing
+    # Fetches QUEUED jobs and publishes them sequentially with 3-4 min jittered spacing
     publish_all_pending_jobs(
         max_per_run=15,        # Safety cap per session (Meta allows max 50 per 24h)
         min_cooldown_sec=180,  # Minimum 3 minutes between Reels
