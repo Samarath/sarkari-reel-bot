@@ -137,11 +137,6 @@ class ReelPublisher:
         """
         Runs before anything is rendered or uploaded. Returns which platforms
         are usable right now plus the remaining Instagram 24h quota.
-        (Instagram is the priority: if it is unavailable, the caller posts nothing.)
-
-        Note: Facebook has no quota endpoint, so a 368 posting block can only
-        be detected for sure when posting. This pre-check catches bad/expired
-        tokens and API-level throttling early.
         """
         if self.dry_run:
             return {"instagram": True, "facebook": True, "ig_quota": 25}
@@ -230,9 +225,10 @@ class ReelPublisher:
             f"🎓 Qualification / Eligibility: {qualification}\n"
             f"🎂 Age Limit: {age_limit}\n"
             f"⏳ Last Date to Apply: {last_date}\n\n"
-            f"🔗 OFFICIAL APPLY LINK (No Middlemen):\n"
+            f"🔗 HOW TO APPLY (Apply Kaise Karein):\n"
             f"👉 {apply_url}\n"
-            f"(Facebook par link direct click karein • Instagram par copy karke browser mein open karein)\n\n"
+            f"📌 Check Bio for all apply links! (Apply karne ke sabhi links Bio mein hain) 🔗\n"
+            f"(Instagram: Check Bio 👆 | Facebook: Check Description 👇)\n\n"
             f"📥 Is Reel ko SAVE karlo taaki last date miss na ho, aur apne dosto ke sath SHARE karo!\n"
             f"Follow @sarkaridrop har roz nayi Central & State Govt job updates ke liye 🔔\n\n"
             f"🔎 Search Keywords:\n"
@@ -437,14 +433,6 @@ def publish_all_pending_jobs(
 ):
     """
     Fetches pending ('QUEUED') jobs from Firestore and publishes them one by one.
-
-    Platform logic:
-      - Instagram is the priority. The pre-flight check runs first; if Instagram is
-        unavailable (rate-limited, quota used up, bad token), NOTHING is posted anywhere.
-      - Each job goes to Instagram first. If Instagram gets rate-limited at any point,
-        the batch stops immediately (no Facebook fallback) and remaining jobs stay 'QUEUED'.
-      - Facebook is only attempted AFTER Instagram succeeds. If Facebook fails or is
-        rate-limited, Instagram posting continues normally.
     """
     db = FirestoreManager()
     renderer = ReelCardRenderer()

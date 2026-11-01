@@ -101,8 +101,8 @@ class FirestoreManager:
 
             # Match 1: Same agency + same numeric vacancy count (e.g., DGQA + 32)
             if (
-                str(job.vacancies) not in ("Multiple", "Refer Notice", "0")
-                and str(existing.get("vacancies")) == str(job.vacancies)
+                    str(job.vacancies) not in ("Multiple", "Refer Notice", "0")
+                    and str(existing.get("vacancies")) == str(job.vacancies)
             ):
                 return True
 
@@ -130,6 +130,35 @@ class FirestoreManager:
         resp.raise_for_status()
         if job.status == "QUEUED":
             print(f"   [DB] Queued: {job.agency} - {job.post_name[:35]} (Score: {job.priority_score})")
+
+    def save_to_web_jobs(self, job: ScrapedJobNotice, raw_data: dict) -> None:
+        """
+        Saves the full detailed job data to a separate collection for the Next.js website.
+        Uses the AI-cleaned Markdown for the article body.
+        """
+        url = f"{self.base_url}/web_jobs/{job.job_id}"
+        spam_keywords = ["whatsapp", "telegram", "t.me", "wa.me", "mobile app", "instagram", "facebook", "twitter",
+                         "freejobalert"]
+
+        # Clean promotional rows from the tables
+        clean_tables = [
+            row for row in raw_data.get("table_rows", [])
+            if not any(spam in row["key"].lower() or spam in row["val"].lower() for spam in spam_keywords)
+        ]
+
+        web_doc = job.model_dump()
+
+        # --- NEW: Append the category before saving to Firestore ---
+        web_doc["category"] = raw_data.get("category", "Central")
+
+        # Use the AI-generated Markdown content
+        web_doc["full_article_markdown"] = raw_data.get("ai_clean_markdown", raw_data.get("full_article_text", ""))
+        web_doc["table_rows_json"] = json.dumps(clean_tables)
+        web_doc["important_links_json"] = json.dumps(raw_data.get("verified_external_links", []))
+
+        payload = self._to_firestore_fields(web_doc)
+        resp = requests.patch(url, headers=self._headers(), json=payload, timeout=15)
+        resp.raise_for_status()
 
     def get_next_batch_to_publish(self, batch_size: int = 3) -> list[dict]:
         """Fetches 'QUEUED' jobs and returns the top N ordered by priority_score."""

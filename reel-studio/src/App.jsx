@@ -436,7 +436,7 @@ export default function App() {
             <div className="w-full p-7 rounded-3xl bg-white border-3 border-slate-900 shadow-[8px_8px_0px_#0F172A] flex items-center justify-between px-9">
           <div className="flex flex-col min-w-0 flex-1 pr-6">
   <span className="text-lg font-mono-code uppercase tracking-widest text-slate-500 font-bold">
-    DIRECT OFFICIAL PORTAL (CHECK LINK IN CAPTION):
+    DIRECT OFFICIAL PORTAL (LINK IN BIO & DESCRIPTION):
   </span>
   <FitLink text={domain} color={theme.accent} />
 </div>

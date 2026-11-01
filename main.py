@@ -262,6 +262,37 @@ class JobScraper:
                 return result
         return None
 
+    def _clean_text_with_llm(self, raw_text: str) -> str:
+        system_instructions = (
+            "You are a professional editor for a government job portal. "
+            "Clean the provided raw scraped text by removing all author names, author bios, "
+            "'Officially Verified' tags, 'FreeJobAlert' references, social media links, "
+            "'Tags', and any 'Related Jobs', 'Recent Posts', or cross-promotional recruitment lists at the bottom. "
+            "Return ONLY a valid JSON object matching this schema:\n"
+            "{\n"
+            '  "clean_content": "A well-formatted Markdown string containing the cleaned job details, eligibility, and selection process."\n'
+            "}"
+        )
+        user_prompt = f"RAW TEXT:\n{raw_text[:4000]}"
+
+        key = self._cache_key("web_clean", user_prompt)
+        if key in self._cache:
+            return self._cache[key].get("clean_content", "")
+
+        providers = {"gemini": self._call_gemini, "groq": self._call_groq}
+        order = [p.strip().lower() for p in os.getenv("LLM_ORDER", "groq,gemini").split(",")]
+        for name in order:
+            fn = providers.get(name)
+            if not fn:
+                continue
+            result = fn(system_instructions, user_prompt)
+            if result and "clean_content" in result:
+                self._cache[key] = result
+                self._save_cache()
+                return result["clean_content"]
+
+        return raw_text
+
     def _parse_headline_fallbacks(self, h1_title: str) -> tuple[str, str, int]:
         clean = h1_title.replace("–", "-").replace("—", "-")
         no_10_plus_2 = re.sub(r"10\+2", "", clean)
@@ -380,9 +411,16 @@ class JobScraper:
             seen_urls.add(clean_url)
             if art_id:
                 seen_article_ids.add(art_id)
-            valid_targets.append({"title": title, "url": clean_url})
 
-        print(f"Scout found {len(valid_targets)} unique listings across 'Job Notifications' & 'State Job Notifications'.")
+            # --- NEW: Save the section name so we know if it's State or Central ---
+            valid_targets.append({
+                "title": title,
+                "url": clean_url,
+                "section": item.get("section", "Job Notifications")
+            })
+
+        print(
+            f"Scout found {len(valid_targets)} unique listings across 'Job Notifications' & 'State Job Notifications'.")
         return valid_targets
 
     def scrape_job_page(self, page, target: dict, job_id: str) -> dict:
@@ -450,12 +488,17 @@ class JobScraper:
             raw_domain = match.group(1).strip(".,;)")
             candidate_url = raw_domain if raw_domain.startswith("http") else f"https://{raw_domain}"
             if self._is_valid_official_url(candidate_url):
-                verified_external_links.append({"label": "plain_text_domain", "context": "article_body", "url": candidate_url})
+                verified_external_links.append(
+                    {"label": "plain_text_domain", "context": "article_body", "url": candidate_url})
+
+        # --- NEW: Determine the category based on the section it was scraped from ---
+        category = "State" if target.get("section") == "State Job Notifications" else "Central"
 
         return {
             "job_id": job_id,
             "url": url,
             "raw_title": raw_title,
+            "category": category,  # Added to dictionary here
             "h1_title": h1_title,
             "table_rows": table_rows,
             "full_article_text": full_article_text,
@@ -543,35 +586,35 @@ class JobScraper:
                     agency = acronym.group(1) if acronym else val.split(",")[0].strip().upper()[:35]
 
             elif row["colCount"] == 2 and key in (
-                "post name", "post names", "post name(s)", "name of the post",
-                "name of post", "post / trade name", "post"
+                    "post name", "post names", "post name(s)", "name of the post",
+                    "name of post", "post / trade name", "post"
             ):
                 if val and len(val) < 95 and not val.isdigit() and not self._is_fake_table_header_value(val):
                     post_name = val
 
             elif row["colCount"] == 2 and key in (
-                "vacancies", "total vacancies", "no of posts", "no. of posts", "total posts", "vacancy"
+                    "vacancies", "total vacancies", "no of posts", "no. of posts", "total posts", "vacancy"
             ):
                 nums = re.findall(r"\b(\d[\d,]*)\b", val)
                 if nums:
                     vacancy_count = int(nums[0].replace(",", ""))
 
             elif row["colCount"] == 2 and any(k == key or key.startswith(k) for k in (
-                "qualification", "educational qualification", "essential qualification",
-                "eligibility", "who can apply", "education"
+                    "qualification", "educational qualification", "essential qualification",
+                    "eligibility", "who can apply", "education"
             )):
                 if val and len(val) < 140 and not self._is_fake_table_header_value(val):
                     qualification = val
 
             elif row["colCount"] == 2 and key in (
-                "age limit", "age", "maximum age", "age requirement", "upper age limit"
+                    "age limit", "age", "maximum age", "age requirement", "upper age limit"
             ):
                 if val and len(val) < 90 and not self._is_fake_table_header_value(val):
                     age_limit = val
 
             elif any(k in key for k in (
-                "last date", "closing date", "end date", "apply till",
-                "submission of application", "application close"
+                    "last date", "closing date", "end date", "apply till",
+                    "submission of application", "application close"
             )) and not any(start_w in key for start_w in ("start", "opening", "begin", "commence")):
                 all_dates_in_row = self.date_regex.findall(full_val)
                 if all_dates_in_row:
@@ -631,10 +674,10 @@ class JobScraper:
 
         non_pdf_links = [l["url"] for l in verified_external_links if not l["url"].lower().endswith(".pdf")]
         final_official_link = (
-            apply_url
-            or official_site
-            or (non_pdf_links[0] if non_pdf_links else None)
-            or (verified_external_links[0]["url"] if verified_external_links else "Refer Official Notification")
+                apply_url
+                or official_site
+                or (non_pdf_links[0] if non_pdf_links else None)
+                or (verified_external_links[0]["url"] if verified_external_links else "Refer Official Notification")
         )
         vacancies_str = str(vacancy_count) if vacancy_count > 0 else "Multiple"
         priority = self._calculate_dynamic_score(vacancy_count, is_today=True)
@@ -718,19 +761,27 @@ class JobScraper:
                 # 1. In-memory check for two different URLs in the same run that resolved to the same job
                 mem_key = f"{notice.agency}_{notice.vacancies}_{notice.post_name.lower()[:15]}"
                 if mem_key in batch_seen_keys:
-                    print(f"   [SKIP BATCH DUPLICATE] {notice.agency} - {notice.post_name} already processed in this run.")
+                    print(
+                        f"   [SKIP BATCH DUPLICATE] {notice.agency} - {notice.post_name} already processed in this run.")
                     continue
 
                 # 2. Firestore check against previously saved jobs
                 if not force_rescrape and self.db.is_duplicate_content(notice):
                     print(
-                        f"   [SKIP DB DUPLICATE] {notice.agency} - {notice.post_name} "
-                        f"({notice.vacancies} posts) already in Firestore."
-                    )
+                        f"   [SKIP DB DUPLICATE] {notice.agency} - {notice.post_name} ({notice.vacancies} posts) already in Firestore.")
                     continue
 
                 batch_seen_keys.add(mem_key)
+
+                # 3. Dual Write: Save to Job Notifications (Reel Bot) AND Web Jobs (Next.js)
                 self.db.save_job_to_queue(notice)
+
+                # Ask AI to generate the clean web article
+                clean_markdown = self._clean_text_with_llm(raw["full_article_text"])
+                raw["ai_clean_markdown"] = clean_markdown
+
+                self.db.save_to_web_jobs(notice, raw)
+
                 new_count += 1
             except Exception as e:
                 print(f"Error saving {raw['url']}: {e}")
