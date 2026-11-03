@@ -188,16 +188,27 @@ class FirestoreManager:
         return queued_jobs[:batch_size]
 
     def mark_status(self, job_id: str, status: str) -> None:
-        """Updates job status to 'PUBLISHED' or 'FAILED'."""
-        url = (
-            f"{self.base_url}/job_notifications/{job_id}"
-            f"?updateMask.fieldPaths=status&updateMask.fieldPaths=published_at"
-        )
+        """Updates job status to 'PUBLISHED' or 'FAILED' in both collections."""
         update_data = {
             "status": status,
             "published_at": datetime.now(timezone.utc) if status == "PUBLISHED" else None,
         }
         payload = self._to_firestore_fields(update_data)
-        resp = requests.patch(url, headers=self._headers(), json=payload, timeout=15)
-        resp.raise_for_status()
-        print(f"   [DB] Updated {job_id} -> {status}")
+ 
+        # 1. Update the Job Notifications collection (for the Reel Bot)
+        url_reels = (
+            f"{self.base_url}/job_notifications/{job_id}"
+            f"?updateMask.fieldPaths=status&updateMask.fieldPaths=published_at"
+        )
+        resp_reels = requests.patch(url_reels, headers=self._headers(), json=payload, timeout=15)
+        resp_reels.raise_for_status()
+
+        # 2. Update the Web Jobs collection (for the Next.js website)
+        url_web = (
+            f"{self.base_url}/web_jobs/{job_id}"
+            f"?updateMask.fieldPaths=status&updateMask.fieldPaths=published_at"
+        )
+        resp_web = requests.patch(url_web, headers=self._headers(), json=payload, timeout=15)
+        resp_web.raise_for_status()
+
+        print(f"   [DB] Updated {job_id} -> {status} across both collections")
